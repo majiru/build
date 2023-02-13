@@ -1,5 +1,6 @@
 #include <u.h>
 #include <libc.h>
+#include <ctype.h>
 #include <fcall.h>
 #include <thread.h>
 #include <9p.h>
@@ -58,7 +59,6 @@ fsreadtile(Req *r)
 
 	f = r->fid->file->aux;
 	if(f->buf == nil){
-		print("reading %d x %d tile\n", f->x, f->y);
 		f->buf = mallocz((11 * 5) + 5 + (f->x * f->y * 4), 1);
 		sprint((char*)f->buf, "%11s %11d %11d %11d %11d", "a8r8g8b8", 0, 0, f->x, f->y);
 		dot = (uint*)(f->buf + (11 * 5) + 5);
@@ -157,6 +157,7 @@ parsegrp(int fd)
 {
 	char *kens = "KenSilverman";
 	uchar buf[64];
+	uchar *p;
 	int i, n;
 	ulong off;
 	XFile *f;
@@ -178,7 +179,11 @@ parsegrp(int fd)
 	ggrp.nf = get32((uchar*)buf);
 	ggrp.f = f = mallocz(sizeof(XFile) * ggrp.nf, 1);
 	for(i = 0; i < ggrp.nf; i++,f++){
-		n = read(fd, f->name, sizeof(f->name) - 1);
+		n = read(fd, buf, 12);
+		buf[n+1] = 0;
+		for(p = buf; p <= buf+n; p++)
+			*p = tolower(*p);
+		memcpy(f->name, buf, n);
 		off += n;
 		n = read(fd, buf, 4);
 		off += n;
@@ -189,19 +194,19 @@ parsegrp(int fd)
 	f = ggrp.f;
 	for(i = 0; i < ggrp.nf; i++,f++){
 		f->off = off;
-		if(strstr(f->name, ".ART") != nil)
+		if(strstr(f->name, ".art") != nil)
 			parseart(fd, off);
 		else
 			createfile(fs.tree->root, f->name, user, 0666, f);
 
-		if(strcmp(f->name, "PALETTE.DAT") == 0)
+		if(strcmp(f->name, "palette.dat") == 0)
 			parsepal(fd, off);
 		off = f->off + f->size;
 	}
 
-	dir = createfile(fs.tree->root, "ART", user, 0644|DMDIR, nil);
+	dir = createfile(fs.tree->root, "art", user, 0644|DMDIR, nil);
 	for(i = 0; i < ggrp.nt; i++)
-		createfile(dir, smprint("%05d.TILE", i), user, 0666, ggrp.tiles + i);
+		createfile(dir, smprint("%05d.tile", i), user, 0666, ggrp.tiles + i);
 	free(user);
 }
 
