@@ -63,6 +63,6 @@ play '/mnt/grp/'^`{fortune /fd/0 <<.
 	whipyu01.voc
 	yippie01.voc
 	yohoho01.voc
-	YOHOHO09.VOC
+	yohoho09.voc
 .
 }
