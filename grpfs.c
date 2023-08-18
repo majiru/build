@@ -1,5 +1,6 @@
 #include <u.h>
 #include <libc.h>
+#include <bio.h>
 #include <ctype.h>
 #include <fcall.h>
 #include <thread.h>
@@ -63,9 +64,8 @@ fsreadtile(Req *r)
 		sprint((char*)f->buf, "%11s %11d %11d %11d %11d", "a8r8g8b8", 0, 0, f->x, f->y);
 		dot = (uint*)(f->buf + (11 * 5) + 5);
 		pread(ggrp.fd, buf, f->x * f->y, f->off);
-		for(i = 0; i < f->x * f->y; i++){
+		for(i = 0; i < f->x * f->y; i++)
 			dot[i] = ggrp.pal[buf[i]];
-		}
 		f->size = (11 * 5) + 5 + (f->x * f->y * 4);
 	}
 	readbuf(r, f->buf, f->size);
@@ -101,26 +101,25 @@ Srv fs = {
 };
 
 void
-parseart(int fd, ulong off)
+parseart(Biobuf *b, ulong off)
 {
 	static short tilesx[1024];
 	static short tilesy[1024];
 	uchar buf[16];
 	XFile *f;
 	int nt, i, n;
-	ulong start;
 
-	start = off;
-	n = pread(fd, buf, 16, start);
+	Bseek(b, off, 0);
+	n = Bread(b, buf, 16);
 	off += n;
 	nt = get32(buf+12) - get32(buf+8) + 1;
 
 	for(i = 0; i < nt; i++){
-		pread(fd, buf, 2, start + 16 + (i * 2));
+		Bread(b, buf, 2);
 		tilesx[i] = get16(buf);
 	}
 	for(i = 0; i < nt; i++){
-		pread(fd, buf, 2, start + 16 + ((i+nt) * 2));
+		Bread(b, buf, 2);
 		tilesy[i] = get16(buf);
 	}
 	off += (nt * 2) + (nt * 2) + (nt * 4);
@@ -146,10 +145,8 @@ parsepal(int fd, int off)
 
 	memset(ggrp.pal, 0, sizeof ggrp.pal);
 	pread(fd, buf, sizeof buf, off);
-	for(i = 0; i < sizeof buf; i += 3){
-		//print("%ud %ud %ud\n", buf[i], buf[i+1], buf[i+2]);
+	for(i = 0; i < sizeof buf; i += 3)
 		ggrp.pal[i/3] = ((buf[i+2]*4)<<0) | ((buf[i+1]*4)<<8) | ((buf[i]*4)<<16);
-	}
 }
 
 void
@@ -163,12 +160,14 @@ parsegrp(int fd)
 	XFile *f;
 	char *user;
 	File *dir;
+	Biobuf *b;
 
-	off = n = read(fd, buf, strlen(kens));
+	b = Bfdopen(fd, OREAD);
+	off = n = Bread(b, buf, strlen(kens));
 	if(n < 0 || memcmp(buf, kens, n) != 0)
 		sysfatal("invalid file");
 
-	n = read(fd, buf, 4);
+	n = Bread(b, buf, 4);
 	if(n != 4)
 		sysfatal("failed to read number of files");
 
@@ -179,13 +178,13 @@ parsegrp(int fd)
 	ggrp.nf = get32((uchar*)buf);
 	ggrp.f = f = mallocz(sizeof(XFile) * ggrp.nf, 1);
 	for(i = 0; i < ggrp.nf; i++,f++){
-		n = read(fd, buf, 12);
+		n = Bread(b, buf, 12);
 		buf[n+1] = 0;
 		for(p = buf; p <= buf+n; p++)
 			*p = tolower(*p);
 		memcpy(f->name, buf, n);
 		off += n;
-		n = read(fd, buf, 4);
+		n = Bread(b, buf, 4);
 		off += n;
 		f->size = get32((uchar*)buf);
 	}
@@ -195,7 +194,7 @@ parsegrp(int fd)
 	for(i = 0; i < ggrp.nf; i++,f++){
 		f->off = off;
 		if(strstr(f->name, ".art") != nil)
-			parseart(fd, off);
+			parseart(b, off);
 		else
 			createfile(fs.tree->root, f->name, user, 0666, f);
 
