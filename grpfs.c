@@ -10,7 +10,7 @@ typedef struct Tile Tile;
 typedef struct XFile XFile;
 typedef struct Grp Grp;
 
-enum { Qfile, Qtile };
+enum { Qfile, Qtile, Qgrp };
 
 struct XFile {
 	char type;
@@ -30,60 +30,47 @@ struct Grp {
 	uint pal[256];
 };
 
-ulong
-get16(uchar *b)
-{
-	ulong x;
+#define GET16(p) ((u16int)(p)[0] | (u16int)(p)[1]<<8)
+#define GET32(p) ((u32int)(p)[0] | (u32int)(p)[1]<<8 | (u32int)(p)[2]<<16 | (u32int)(p)[3]<<24)
+#define PUT16(p, u) ((p)[1] = (u)>>8, (p)[0] = (u))
+#define PUT32(p, u) ((p)[3] = (u)>>24, (p)[2] = (u)>>16, (p)[1] = (u)>>8, (p)[0] = (u))
 
-	x = (b[0]<<0) | (b[1]<<8);
-	return x;
-}
-
-ulong
-get32(uchar *b)
-{
-	ulong x;
-
-	x = (b[0]<<0) | (b[1]<<8) | (b[2]<<16) | (b[3]<<24);
-	return x;
-}
-
-Grp ggrp;
+static Grp ggrp;
+static char kens[] = "KenSilverman";
 
 static void
-fsreadtile(Req *r)
+fsreadtile(Req *r, XFile *f)
 {
-	XFile *f;
 	static uchar buf[64*1024];
 	uint *dot;
 	int i;
 
 	f = r->fid->file->aux;
-	if(f->buf == nil){
-		f->buf = mallocz((11 * 5) + 5 + (f->x * f->y * 4), 1);
-		sprint((char*)f->buf, "%11s %11d %11d %11d %11d", "a8r8g8b8", 0, 0, f->x, f->y);
-		dot = (uint*)(f->buf + (11 * 5) + 5);
-		pread(ggrp.fd, buf, f->x * f->y, f->off);
-		for(i = 0; i < f->x * f->y; i++)
-			dot[i] = ggrp.pal[buf[i]];
-		f->size = (11 * 5) + 5 + (f->x * f->y * 4);
-	}
-	readbuf(r, f->buf, f->size);
-	respond(r, nil);
-}
-
-static void
-fsread(Req *r)
-{
-	XFile *f;
-
-	f = r->fid->file->aux;
-
-	if(f->type == Qtile){
-		fsreadtile(r);
+	if(f->buf != nil){
+	Service:
+		readbuf(r, f->buf, f->size);
+		respond(r, nil);
 		return;
 	}
 
+	f->buf = mallocz((11 * 5) + 5 + (f->x * f->y * 4), 1);
+	sprint((char*)f->buf, "%11s %11d %11d %11d %11d", "a8r8g8b8", 0, 0, f->x, f->y);
+	dot = (uint*)(f->buf + (11 * 5) + 5);
+	pread(ggrp.fd, buf, f->x * f->y, f->off);
+	for(i = 0; i < f->x * f->y; i++)
+		dot[i] = ggrp.pal[buf[i]];
+	f->size = (11 * 5) + 5 + (f->x * f->y * 4);
+	goto Service;
+}
+
+static void
+fsreadfile(Req *r, XFile *f)
+{
+	if(f->buf){
+		readbuf(r, f->buf, f->size);
+		respond(r, nil);
+		return;
+	}
 	r->ofcall.count = r->ifcall.count;
 	if(r->ifcall.offset >= f->size){
 		r->ofcall.count = 0;
@@ -96,8 +83,128 @@ fsread(Req *r)
 	respond(r, nil);
 }
 
+static void
+fsreadgrp(Req *r, XFile*)
+{
+	int i, j;
+	XFile *f;
+	vlong off;
+	u32int count;
+	uchar buf[8192];
+	uchar *p;
+
+	off = r->ifcall.offset;
+	count = r->ifcall.count;
+	if(off < 12 + 4){
+		memcpy(buf, kens, 12);
+		PUT32(buf+12, ggrp.nf);
+		readbuf(r, buf, 16);
+		respond(r, nil);
+		return;
+	}
+	off -= 12 + 4;
+	if(off < 16 * ggrp.nf){
+		assert(sizeof buf > 16*ggrp.nf);
+		p = buf;
+		for(i = 0; i < ggrp.nf; i++){
+			memcpy(p, ggrp.f[i].name, 12);
+			for(j = 0; j < 12; j++)
+				*p++ = toupper(*p);
+			PUT32(p, ggrp.f[i].size);
+			p+=4;
+		}
+		r->ifcall.offset = off;
+		readbuf(r, buf, 16*ggrp.nf);
+		respond(r, nil);
+		return;
+	}
+	off -= 16*ggrp.nf;
+	for(i = 0; i < ggrp.nf; i++){
+		f = ggrp.f+i;
+		if(off >= f->size){
+			off -= f->size;
+			continue;
+		}
+		if(count+off >= f->size)
+			count = f->size-off;
+		if(f->buf != nil){
+			r->ifcall.offset = off;
+			r->ifcall.count = count;
+			readbuf(r, f->buf, f->size);
+		} else
+			r->ofcall.count = pread(ggrp.fd, r->ofcall.data, count, off+f->off);
+		respond(r, nil);
+		return;
+	}
+	r->ofcall.count = 0;
+	respond(r, nil);
+}
+
+void (*readftab[])(Req*,XFile*) = {
+	[Qfile] fsreadfile,
+	[Qtile] fsreadtile,
+	[Qgrp]  fsreadgrp,
+};
+
+static void
+fsread(Req *r)
+{
+	XFile *f;
+
+	f = r->fid->file->aux;
+	if(f->type >= nelem(readftab))
+		sysfatal("invalid type %d", f->type);
+	readftab[f->type](r, f);
+}
+
+static void
+fswritefile(Req *r, XFile *f)
+{
+	vlong i, n;
+
+	if(f->buf == nil){
+		f->buf = malloc(f->size);
+		for(n = 0; n != f->size;){
+			i = pread(ggrp.fd, f->buf + n, f->size - n, f->off + n);
+			if(i < 0){
+				responderror(r);
+				return;
+			}
+			n += i;
+		}
+	}
+	if(r->ifcall.count + r->ifcall.offset > f->size){
+		f->size = r->ifcall.count + r->ifcall.offset;
+		f->buf = realloc(f->buf, f->size);
+	}
+	memmove(f->buf + r->ifcall.offset, r->ifcall.data, r->ifcall.count);
+	r->ofcall.count = r->ifcall.count;
+	respond(r, nil);
+}
+
+void (*writeftab[])(Req*,XFile*) = {
+	[Qfile] fswritefile,
+	[Qtile] nil,
+	[Qgrp]  nil,
+};
+
+static void
+fswrite(Req *r)
+{
+	XFile *f;
+
+	f = r->fid->file->aux;
+	if(f->type >= nelem(writeftab))
+		sysfatal("invalid type %d", f->type);
+	if(writeftab[f->type] == nil)
+		respond(r, "not supported");
+	else
+		writeftab[f->type](r, f);
+}
+
 Srv fs = {
 	.read=fsread,
+	.write=fswrite,
 };
 
 void
@@ -112,15 +219,15 @@ parseart(Biobuf *b, ulong off)
 	Bseek(b, off, 0);
 	n = Bread(b, buf, 16);
 	off += n;
-	nt = get32(buf+12) - get32(buf+8) + 1;
+	nt = GET32(buf+12) - GET32(buf+8) + 1;
 
 	for(i = 0; i < nt; i++){
 		Bread(b, buf, 2);
-		tilesx[i] = get16(buf);
+		tilesx[i] = GET16(buf);
 	}
 	for(i = 0; i < nt; i++){
 		Bread(b, buf, 2);
-		tilesy[i] = get16(buf);
+		tilesy[i] = GET16(buf);
 	}
 	off += (nt * 2) + (nt * 2) + (nt * 4);
 
@@ -152,7 +259,6 @@ parsepal(int fd, int off)
 void
 parsegrp(int fd)
 {
-	char *kens = "KenSilverman";
 	uchar buf[64];
 	uchar *p;
 	int i, n;
@@ -173,9 +279,12 @@ parsegrp(int fd)
 
 	user = getenv("user");
 	fs.tree = alloctree(user, "sys", 0644, nil);
+	f = mallocz(sizeof *f, 1);
+	f->type = Qgrp;
+	createfile(fs.tree->root, "GRP", user, 0444, f);
 	off += n;
 	ggrp.fd = fd;
-	ggrp.nf = get32((uchar*)buf);
+	ggrp.nf = GET32((uchar*)buf);
 	ggrp.f = f = mallocz(sizeof(XFile) * ggrp.nf, 1);
 	for(i = 0; i < ggrp.nf; i++,f++){
 		n = Bread(b, buf, 12);
@@ -186,7 +295,7 @@ parsegrp(int fd)
 		off += n;
 		n = Bread(b, buf, 4);
 		off += n;
-		f->size = get32((uchar*)buf);
+		f->size = GET32((uchar*)buf);
 	}
 
 	ggrp.nt = 0;
